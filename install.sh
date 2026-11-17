@@ -2,11 +2,11 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.6.1
+VERSION=0.6.2
 REPO=pupsinatorvpn/pupsinator-router
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=26.11.9
-PAYLOAD_SHA=f9aaf7c1d8a50dfbda9bfd64aeb00fc1cf64e4e5fda67641b44667c43746b542
+PAYLOAD_SHA=90c82ec37ed1603dc19ada09b2e93b9e4b61c25b4ca26a3b71ac0fb3234faa16
 error() { echo "Pupsinator: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
