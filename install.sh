@@ -2,11 +2,11 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.6.2
+VERSION=0.6.3
 REPO=pupsinatorvpn/pupsinator-router
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=26.11.9
-PAYLOAD_SHA=90c82ec37ed1603dc19ada09b2e93b9e4b61c25b4ca26a3b71ac0fb3234faa16
+PAYLOAD_SHA=95e9fcf1d4df196ee0199783fa4953978820807eab4198e397f415cdefcd633b
 error() { echo "Pupsinator: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
@@ -90,7 +90,12 @@ if grep -E '(^/|(^|/)\.\.(/|$))' "$stage/files" >/dev/null; then error 'Неко
 mkdir "$stage/filesystem"
 tar -xzf "$stage/payload.tgz" -C "$stage/filesystem"
 for f in "$stage/filesystem"/usr/lib/pupsinator/*.sh; do sh -n "$f"; done
-for f in "$stage/filesystem"/usr/lib/pupsinator/*.uc; do case "$f" in */telemetry.uc) continue;; esac; ucode -c -o "$stage/check.ucb" "$f"; done
+for f in "$stage/filesystem"/usr/lib/pupsinator/*.uc; do
+ case "$f" in
+  */telemetry.uc|*/support.uc) printf "import * as candidate from '%s';\n" "$f" > "$stage/check-module.uc"; ucode -c -o "$stage/check.ucb" "$stage/check-module.uc" ;;
+  *) ucode -c -o "$stage/check.ucb" "$f" ;;
+ esac
+done
 if [ "$core_new" = 1 ]; then
  release_file "pupsinator-xray-$CORE_ARCH.gz" "$stage/core.gz"
  echo "$CORE_GZIP_SHA  $stage/core.gz" | sha256sum -c -
