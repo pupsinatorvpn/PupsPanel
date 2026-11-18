@@ -2,22 +2,30 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.6.4
-REPO=pupsinatorvpn/pupsinator-router
+VERSION=0.7.0
+REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
-CORE_VERSION=26.11.9
-PAYLOAD_SHA=e32d3cf9b07e50786819f634f426aca0eb84b800e5e6ce8783a3bc4c2b93ebf2
-error() { echo "Pupsinator: $*" >&2; exit 1; }
+CORE_VERSION=0.10.1
+CORE_FAMILY=Xray-rust
+CORE_ASSET_PREFIX=pupspanel-core
+PAYLOAD_SHA=c39acb470ed4ba79bea748fd05570782c2aa4c0142396741b81884224b0b8711
+error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
+for owned in /etc/pupsinator /etc/pupsinator-rollback /etc/pupspanel-core-rollback /usr/bin/pupsinator-xray /usr/bin/pupsinator-xray.new; do
+ [ ! -L "$owned" ] || error 'Обнаружена неожиданная символическая ссылка в файлах приложения.'
+done
 . /etc/openwrt_release
-case "$DISTRIB_RELEASE" in 25.12.*) ;; *) error 'Первая сборка предназначена для OpenWrt 25.12.';; esac
+case "$DISTRIB_RELEASE" in 24.10.*|25.12.*) ;; *) error 'Требуется OpenWrt 24.10 или 25.12.';; esac
+if [ "$CORE_FAMILY" = Xray-rust ]; then
+ case "$(uname -m)" in aarch64|arm64) ;; *) error 'Проверенная сборка Rust пока только для ARM64.';; esac
+fi
 case "$(uname -m)" in
- aarch64|arm64) CORE_ARCH=arm64; CORE_SHA=c2d1e66a130556d32089adcf38202fcb6f9027e41fb456cc2cda9a5fabdc093a; CORE_GZIP_SHA=7ed7436f3fa4fdd5edeb8e46aaa0cd9cf06f5db41ff6786740e1c7995ef2fe2f ;;
- x86_64|amd64) CORE_ARCH=amd64; CORE_SHA=e87bce586acdb9136aa5b1f1d9c8db9f1ea1d145b6d86368c7f6f662f9f6a66d; CORE_GZIP_SHA=88f7f98df4112859802db4090b4f961be59831c9d7e60930aa5b640ada86e67d ;;
+ aarch64|arm64) CORE_ARCH=arm64; CORE_SHA=938be766ce3dc77a5005bba6ba1ee1d6b9d30bb823496bc66a8605ba23df1118; CORE_GZIP_SHA=26be87b8b70a977606142cc2bcb0443a2103cd05d6b463bb5e7267705b319d89 ;;
+ x86_64|amd64) CORE_ARCH=amd64; CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000; CORE_GZIP_SHA=0000000000000000000000000000000000000000000000000000000000000000 ;;
  mips|mipsel|mipsle)
   package_arch=$(apk --print-arch 2>/dev/null || opkg print-architecture 2>/dev/null || true)
-  case "$package_arch" in *mipsel*|*mipsle*) CORE_ARCH=mipsel; CORE_SHA=5058314c99ec5fc4896b5c7bc55e1b3f7752e754c9df95f8244dab3a4dd8e052; CORE_GZIP_SHA=28d74908e11c46f6dd008512ba5ba946cdc02792251defeda69751190eac83c8;; *) error 'Не подтверждена little-endian архитектура MIPS. Установка остановлена.';; esac
+  case "$package_arch" in *mipsel*|*mipsle*) CORE_ARCH=mipsel; CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000; CORE_GZIP_SHA=0000000000000000000000000000000000000000000000000000000000000000;; *) error 'Не подтверждена little-endian архитектура MIPS. Установка остановлена.';; esac
  ;;
  *) error 'Архитектура пока не поддерживается. Установка не начата.';;
 esac
@@ -25,20 +33,23 @@ memory=$(awk '/MemTotal:/ {print $2}' /proc/meminfo)
 [ "$memory" -ge 110000 ] || error 'Нужно не менее 128 МБ установленной RAM; рекомендуется 256 МБ.'
 [ "$memory" -ge 180000 ] || export GOMEMLIMIT=32MiB
 if [ "${1:-}" = --check ]; then echo "Поддерживаемая платформа: OpenWrt $DISTRIB_RELEASE / $(uname -m), RAM проверена. Место, зависимости и конфликты проверяются при установке. Установка не выполнялась."; exit 0; fi
-if [ -e /tmp/pupsinator/busy ] && [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then error 'Сначала дождитесь завершения текущей операции Pupsinator.'; fi
+if [ -e /tmp/pupsinator/busy ] && [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then error 'Сначала дождитесь завершения текущей операции PupsPanel.'; fi
 mkdir /tmp/pupsinator-installer.lock 2>/dev/null || error 'Другая установка уже выполняется.'
 if [ ! -e /etc/pupsinator-rollback/active ]; then
  for orphan in /etc/pupsinator-core-stage.*; do [ ! -d "$orphan" ] || rm -rf "$orphan"; done
 fi
 stage=$(mktemp -d /tmp/pupsinator-install.XXXXXXXX)
 core_stage=''
+backup=''
 armed=0
 owner_busy=0
 mkdir -p /tmp/pupsinator
 if [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then owner_busy=1; echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
 finish() {
  code=$?
+ if [ "$code" -ne 0 ] && [ "$armed" = 0 ] && [ -n "$backup" ]; then case "$backup" in /etc/pupsinator-rollback/txn.*) rm -rf "$backup";; esac; fi
  if [ "$code" -ne 0 ] && [ "$armed" = 1 ]; then cp /usr/lib/pupsinator/rollback-update.sh "$stage/recover.sh"; /bin/sh "$stage/recover.sh" || true; fi
+ [ "$armed" != 1 ] || rm -f /usr/bin/pupsinator-xray.new
  case "$stage" in /tmp/pupsinator-install.*) rm -rf "$stage";; esac
  case "$core_stage" in /etc/pupsinator-core-stage.*) rm -rf "$core_stage";; esac
  if [ "$owner_busy" = 1 ]; then echo "$code" > /tmp/pupsinator/job-exit; rm -f /tmp/pupsinator/busy; fi
@@ -59,12 +70,16 @@ release_file() {
  if fetch "$MIRROR/v$VERSION/$1" "$2"; then return; fi
  fetch "https://github.com/$REPO/releases/download/v$VERSION/$1" "$2"
 }
+dependencies='curl ca-bundle ucode ucode-mod-fs ucode-mod-uci ucode-mod-digest rpcd-mod-ucode kmod-tun kmod-nft-tproxy ip-full'
+command -v timeout >/dev/null 2>&1 || dependencies="$dependencies coreutils-timeout"
+missing=''
 if command -v apk >/dev/null 2>&1; then
- apk add curl ca-bundle ucode ucode-mod-fs ucode-mod-uci ucode-mod-digest rpcd-mod-ucode kmod-tun kmod-nft-tproxy ip-full
+ for package in $dependencies; do apk info -e "$package" >/dev/null 2>&1 || missing="$missing $package"; done
+ [ -z "$missing" ] || apk add $missing
 elif command -v opkg >/dev/null 2>&1; then
- opkg update
- opkg install curl ca-bundle ucode ucode-mod-fs ucode-mod-uci ucode-mod-digest rpcd-mod-ucode kmod-tun kmod-nft-tproxy ip-full
-else error 'Не найден пакетный менеджер OpenWrt.'; fi
+ for package in $dependencies; do opkg list-installed "$package" | grep -q "^$package - " || missing="$missing $package"; done
+ if [ -n "$missing" ]; then opkg update; opkg install $missing; fi
+else error 'Не найден apk/opkg.'; fi
 command -v nft >/dev/null || error 'Нужен firewall4/nftables.'
 if [ ! -f /etc/pupsinator/settings.json ]; then
  if ip rule show | grep -Eq '^(110|111):'; then error 'Таблицы маршрутизации 110/111 заняты другой настройкой. Установка остановлена.'; fi
@@ -78,7 +93,7 @@ core_new=0
 if [ ! -x /usr/bin/pupsinator-xray ] || [ "$(sha256sum /usr/bin/pupsinator-xray | awk '{print $1}')" != "$CORE_SHA" ]; then core_new=1; fi
 available=$(df -Pk /overlay | awk 'END {print $4}')
 minimum=12288
-[ "$core_new" != 1 ] || minimum=45056
+[ "$core_new" != 1 ] || minimum=16384
 [ "$available" -ge "$minimum" ] || error "Для безопасной установки нужно $minimum КиБ свободного места. Сейчас $available КиБ."
 if [ "${1:-}" = --update-local ] || [ "${1:-}" = --local ]; then
  [ -f "${2:-}" ] || error 'Не найден локальный архив.'
@@ -92,20 +107,20 @@ tar -xzf "$stage/payload.tgz" -C "$stage/filesystem"
 for f in "$stage/filesystem"/usr/lib/pupsinator/*.sh; do sh -n "$f"; done
 for f in "$stage/filesystem"/usr/lib/pupsinator/*.uc; do
  case "$f" in
-  */telemetry.uc|*/support.uc) printf "import * as candidate from '%s';\n" "$f" > "$stage/check-module.uc"; ucode -c -o "$stage/check.ucb" "$stage/check-module.uc" ;;
+  */telemetry.uc|*/support.uc|*/coverage.uc) printf "import * as candidate from '%s';\n" "$f" > "$stage/check-module.uc"; ucode -c -o "$stage/check.ucb" "$stage/check-module.uc" ;;
   *) ucode -c -o "$stage/check.ucb" "$f" ;;
  esac
 done
 if [ "$core_new" = 1 ]; then
- release_file "pupsinator-xray-$CORE_ARCH.gz" "$stage/core.gz"
+ local_core=''
+ case "${1:-}" in --local|--update-local) local_core="$(dirname "$2")/$CORE_ASSET_PREFIX-$CORE_ARCH.gz";; esac
+ if [ -n "$local_core" ] && [ -f "$local_core" ]; then cp "$local_core" "$stage/core.gz"; else release_file "$CORE_ASSET_PREFIX-$CORE_ARCH.gz" "$stage/core.gz"; fi
  echo "$CORE_GZIP_SHA  $stage/core.gz" | sha256sum -c -
- core_stage=$(mktemp -d /etc/pupsinator-core-stage.XXXXXXXX)
- gzip -dc "$stage/core.gz" > "$core_stage/xray"
- rm -f "$stage/core.gz"
- chmod 755 "$core_stage/xray"
- echo "$CORE_SHA  $core_stage/xray" | sha256sum -c -
- "$core_stage/xray" version | grep -q "^Xray $CORE_VERSION "
- if [ -s /etc/pupsinator/xray.json ]; then "$core_stage/xray" run -test -config /etc/pupsinator/xray.json; fi
+ gzip -t "$stage/core.gz"
+ actual=$(gzip -dc "$stage/core.gz" | sha256sum | awk '{print $1}')
+ [ "$actual" = "$CORE_SHA" ] || error 'Контрольная сумма ядра не совпала.'
+ core_bytes=$(gzip -dc "$stage/core.gz" | wc -c | tr -d '[:space:]')
+ [ "$core_bytes" -gt 0 ] && [ "$core_bytes" -le 134217728 ] || error 'Некорректный размер ядра.'
 fi
 mkdir -p /etc/pupsinator-rollback
 [ ! -e /etc/pupsinator-rollback/active ] || error 'Не завершено предыдущее обновление. Сначала выполните восстановление.'
@@ -118,37 +133,104 @@ while IFS= read -r file; do
  case "$file" in */) continue;; esac
  if [ -e "/$file" ]; then echo "$file" >> "$stage/existing"; else echo "$file" >> "$backup/new-files"; fi
 done < "$stage/files"
-if [ -d /etc/pupsinator ]; then echo etc/pupsinator >> "$stage/existing"; fi
+# Immutable community generations are not changed by a panel/core update.
+# Save all mutable configuration and the cache pointer, not duplicate rule bodies.
+if [ -d /etc/pupsinator ]; then
+ for file in /etc/pupsinator/* /etc/pupsinator/.[!.]*; do
+  [ -e "$file" ] || [ -L "$file" ] || continue
+  [ "$file" = /etc/pupsinator/lists ] || echo "${file#/}" >> "$stage/existing"
+ done
+ if [ -L /etc/pupsinator/lists/current ]; then echo etc/pupsinator/lists/current >> "$stage/existing"; fi
+ for file in /etc/pupsinator/lists/*; do [ ! -f "$file" ] || echo "${file#/}" >> "$stage/existing"; done
+fi
 [ ! -f /etc/config/dhcp ] || echo etc/config/dhcp >> "$stage/existing"
 [ ! -f /etc/crontabs/root ] || echo etc/crontabs/root >> "$stage/existing"
+for prefix in pupsinator pupspanel; do
+ for service in engine health network observe rollback; do
+  file="/etc/init.d/$prefix-$service"
+  [ ! -f "$file" ] || echo "${file#/}" >> "$stage/existing"
+  for file in /etc/rc.d/*"$prefix-$service"; do [ ! -L "$file" ] || echo "${file#/}" >> "$stage/existing"; done
+ done
+done
 tar -czf "$backup/backup.tgz" -C / -T "$stage/existing"
 gzip -t "$backup/backup.tgz"
 [ ! -e /tmp/pupsinator/active ] || touch "$backup/was-active"
 mkdir -p /usr/lib/pupsinator
 cp "$stage/filesystem/usr/lib/pupsinator/rollback-update.sh" /usr/lib/pupsinator/rollback-update.sh
-cp "$stage/filesystem/etc/init.d/pupsinator-rollback" /etc/init.d/pupsinator-rollback
+cp "$stage/filesystem/usr/lib/pupsinator/core-archive.sh" /usr/lib/pupsinator/core-archive.sh
+chmod 700 /usr/lib/pupsinator/core-archive.sh
+cp "$stage/filesystem/etc/init.d/pupspanel-rollback" /etc/init.d/pupspanel-rollback
 chmod 700 /usr/lib/pupsinator/rollback-update.sh
-chmod 755 /etc/init.d/pupsinator-rollback
+chmod 755 /etc/init.d/pupspanel-rollback
 echo "$backup" > /etc/pupsinator-rollback/active
-/etc/init.d/pupsinator-rollback enable
+/etc/init.d/pupspanel-rollback enable
 armed=1
 if [ "$core_new" = 1 ]; then
- [ ! -x /etc/init.d/pupsinator-engine ] || /etc/init.d/pupsinator-engine stop
- if [ -f /usr/bin/pupsinator-xray ]; then mv /usr/bin/pupsinator-xray /usr/bin/pupsinator-xray.previous; fi
- mv "$core_stage/xray" /usr/bin/pupsinator-xray
- chmod 755 /usr/bin/pupsinator-xray
+ if [ -f /usr/bin/pupsinator-xray ]; then
+  if [ -s /etc/pupspanel-core-rollback/go-xray.gz.sha256 ] && [ "$(sha256sum /usr/bin/pupsinator-xray | awk '{print $1}')" = "$(cat /etc/pupspanel-core-rollback/go-xray.gz.sha256)" ] && /usr/lib/pupsinator/core-archive.sh verify /etc/pupspanel-core-rollback/go-xray.gz >/dev/null 2>&1; then
+   for suffix in '' .sha256 .bytes .version .metadata.sha256; do ln "/etc/pupspanel-core-rollback/go-xray.gz$suffix" "$backup/core.previous.gz$suffix"; done
+  else /usr/lib/pupsinator/core-archive.sh save "$backup/core.previous.gz"; fi
+  # A temporary hard link makes rollback independent of free flash. It shares
+  # the existing inode, is never executed, and is removed after qualification.
+  ln /usr/bin/pupsinator-xray "$backup/core.previous.bin"
+  [ "$(sha256sum "$backup/core.previous.bin" | awk '{print $1}')" = "$(cat "$backup/core.previous.gz.sha256")" ] || error 'Ядро изменилось при создании резервной копии.'
+  touch "$backup/core-saved"
+  if /usr/bin/pupsinator-xray version | grep -q '^Xray '; then
+   mkdir -p /etc/pupspanel-core-rollback
+   chmod 700 /etc/pupspanel-core-rollback
+   if ! /usr/lib/pupsinator/core-archive.sh verify /etc/pupspanel-core-rollback/go-xray.gz >/dev/null 2>&1; then
+    for suffix in '' .sha256 .bytes .version .metadata.sha256; do
+     rm -f "/etc/pupspanel-core-rollback/go-xray.gz$suffix.new"
+     ln "$backup/core.previous.gz$suffix" "/etc/pupspanel-core-rollback/go-xray.gz$suffix.new"
+     mv "/etc/pupspanel-core-rollback/go-xray.gz$suffix.new" "/etc/pupspanel-core-rollback/go-xray.gz$suffix"
+    done
+    /usr/lib/pupsinator/core-archive.sh verify /etc/pupspanel-core-rollback/go-xray.gz
+   fi
+  fi
+ fi
+ available=$(df -Pk /overlay | awk 'END {print $4}')
+ needed=$(((core_bytes+1023)/1024+4096))
+ filesystem=$(awk '$2 == "/overlay" {print $3; exit}' /proc/mounts)
+ case "$filesystem" in ubifs|jffs2)
+  compressed=$(wc -c < "$stage/core.gz")
+  estimate=$(((compressed*3/2+1023)/1024+4096))
+  [ "$estimate" -ge "$needed" ] || needed=$estimate
+ ;; esac
+ [ "$available" -ge "$needed" ] || error 'Недостаточно места для атомарной замены: прежнее ядро сохранено.'
+ rm -f /usr/bin/pupsinator-xray.new
+ gzip -dc "$stage/core.gz" > /usr/bin/pupsinator-xray.new
+ echo "$CORE_SHA  /usr/bin/pupsinator-xray.new" | sha256sum -c -
+ chmod 755 /usr/bin/pupsinator-xray.new
+ case "$(/usr/bin/pupsinator-xray.new version | head -n 1)" in "$CORE_FAMILY $CORE_VERSION "*) ;; *) error 'Неожиданная версия ядра.';; esac
+ if [ -s /etc/pupsinator/xray.json ]; then /usr/bin/pupsinator-xray.new run -test -config /etc/pupsinator/xray.json; fi
+ for service in pupsinator-engine pupspanel-engine; do [ ! -x "/etc/init.d/$service" ] || "/etc/init.d/$service" stop; done
+ attempts=0
+ while [ -n "$(pidof pupsinator-xray 2>/dev/null || true)" ] && [ "$attempts" -lt 15 ]; do sleep 1; attempts=$((attempts+1)); done
+ [ -z "$(pidof pupsinator-xray 2>/dev/null || true)" ] || error 'Не удалось остановить прежнее ядро.'
+ mv /usr/bin/pupsinator-xray.new /usr/bin/pupsinator-xray
+ # Wait for UBIFS to release the unlinked old ELF before a possible atomic restore.
+ sync
+ rm -f "$stage/core.gz"
 fi
 tar -xzf "$stage/payload.tgz" -C /
+# Migrate legacy procd names after a recoverable snapshot, before enabling new ones.
+for service in engine health network observe rollback; do
+ file="/etc/init.d/pupsinator-$service"
+ if [ -x "$file" ]; then "$file" stop || true; "$file" disable || true; rm -f "$file"; fi
+ for link in /etc/rc.d/*"pupsinator-$service"; do [ ! -L "$link" ] || rm -f "$link"; done
+done
+
 rm -f /www/pupsinator/assets/corgi-offline-v3.png /www/pupsinator/assets/corgi-dns-v3.png
 mkdir -p /etc/pupsinator /tmp/pupsinator
 if [ ! -f /etc/pupsinator/settings.json ]; then ucode /usr/lib/pupsinator/app.uc bootstrap; fi
 /usr/lib/pupsinator/set-update-schedules.sh
-/etc/init.d/pupsinator-health enable
-/etc/init.d/pupsinator-health restart
-/etc/init.d/pupsinator-network enable
+/etc/init.d/pupspanel-health enable
+/etc/init.d/pupspanel-health restart
+/etc/init.d/pupspanel-network enable
 touch /etc/sysupgrade.conf
 grep -qx '/etc/pupsinator/' /etc/sysupgrade.conf || echo '/etc/pupsinator/' >> /etc/sysupgrade.conf
 grep -qx '/etc/pupsinator-rollback/' /etc/sysupgrade.conf || echo '/etc/pupsinator-rollback/' >> /etc/sysupgrade.conf
+grep -qx '/etc/pupspanel-core-rollback/' /etc/sysupgrade.conf || echo '/etc/pupspanel-core-rollback/' >> /etc/sysupgrade.conf
 if [ -e "$backup/was-active" ]; then
  outer_pid=$(cat /tmp/pupsinator/busy 2>/dev/null || true)
  /usr/lib/pupsinator/control.sh rollback
@@ -158,7 +240,14 @@ if [ -e "$backup/was-active" ]; then
  if [ "$owner_busy" = 1 ]; then echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
  code=$(curl --proxy socks5h://127.0.0.1:15434 -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 https://www.gstatic.com/generate_204 || true)
  [ "$code" = 204 ] || error 'Новая версия не прошла проверку VPN. Восстанавливаю предыдущую.'
- nslookup example.com 127.0.0.1 >/dev/null 2>&1 || error 'DNS не прошёл проверку. Восстанавливаю предыдущую.'
+ dns_ready=0
+ # dnsmasq can briefly refuse forwarding while its upstream is being started.
+ # Accept only an actual successful lookup, with a bounded startup window.
+ for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if timeout 8 nslookup example.com 127.0.0.1 > "$stage/dns-check.log" 2>&1; then dns_ready=1; break; fi
+  sleep 2
+ done
+ if [ "$dns_ready" != 1 ]; then cat "$stage/dns-check.log" >&2; error 'DNS не прошёл проверку. Восстанавливаю предыдущую.'; fi
  touch /etc/pupsinator/enabled
 fi
 ucode -c -o "$stage/rpc.ucb" /usr/share/rpcd/ucode/pupsinator
@@ -166,10 +255,10 @@ ucode -c -o "$stage/rpc.ucb" /usr/share/rpcd/ucode/pupsinator
 sleep 2
 if ! ubus call pupsinator monitor >/dev/null 2>&1; then /etc/init.d/rpcd restart; sleep 2; fi
 ubus call pupsinator monitor >/dev/null 2>&1 || error 'Интерфейс новой версии не запустился. Восстанавливаю предыдущую.'
-[ ! -x /etc/init.d/pupsinator-recover ] || { /etc/init.d/pupsinator-recover disable; rm -f /etc/init.d/pupsinator-recover; }
-/etc/init.d/pupsinator-rollback disable
+[ ! -x /etc/init.d/pupspanel-recover ] || { /etc/init.d/pupspanel-recover disable; rm -f /etc/init.d/pupspanel-recover; }
+/etc/init.d/pupspanel-rollback disable
 rm -f /etc/pupsinator-rollback/active /usr/bin/pupsinator-xray.previous
 case "$backup" in /etc/pupsinator-rollback/txn.*) rm -rf "$backup";; esac
 armed=0
 find /tmp -maxdepth 1 -type f -name 'luci-indexcache.*.json' -exec rm -f {} \;
-echo "Pupsinator $VERSION установлен. Службы → PupsinatorVPN. Настройки сохранены; резервная копия удалена после проверки."
+echo "PupsPanel $VERSION установлен. Службы → PupsPanel. Настройки сохранены; резервная копия удалена после проверки."
