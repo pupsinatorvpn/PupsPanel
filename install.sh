@@ -2,13 +2,13 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.7.0
+VERSION=0.7.1
 REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=0.10.1
 CORE_FAMILY=Xray-rust
 CORE_ASSET_PREFIX=pupspanel-core
-PAYLOAD_SHA=c39acb470ed4ba79bea748fd05570782c2aa4c0142396741b81884224b0b8711
+PAYLOAD_SHA=5cf325752b21dd5dd239a7639212571cb0fca7272d07efb17121bc99570b3ada
 error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
