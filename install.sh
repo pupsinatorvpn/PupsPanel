@@ -2,13 +2,13 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.7.4
+VERSION=0.7.5
 REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=0.10.1
 CORE_FAMILY=Xray-rust
 CORE_ASSET_PREFIX=pupspanel-core
-PAYLOAD_SHA=b48b021408a6de9b2fd088ea7d359afdfb4bb60f85d4051d06bd93e39269b23a
+PAYLOAD_SHA=e9494ea93968c514b4eb04309a025cf91ae112143fffb9efc7fd4bc280135638
 error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
@@ -244,7 +244,7 @@ if [ -e "$backup/was-active" ]; then
  PUPS_IN_APP_UPDATE=1 /usr/lib/pupsinator/control.sh connect
  if [ "${PUPS_IN_APP_UPDATE:-0}" = 1 ]; then mkdir -p /tmp/pupsinator/lock; echo "$outer_pid" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
  if [ "$owner_busy" = 1 ]; then echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
- code=$(curl --proxy socks5h://127.0.0.1:15434 -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 15 https://www.gstatic.com/generate_204 || true)
+ code=$(curl --proxy socks5h://127.0.0.1:15434 -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 https://www.gstatic.com/generate_204 || true)
  [ "$code" = 204 ] || error 'Новая версия не прошла проверку VPN. Восстанавливаю предыдущую.'
  dns_ready=0
  # dnsmasq can briefly refuse forwarding while its upstream is being started.
