@@ -2,13 +2,13 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.7.5
+VERSION=0.8.0
 REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=0.10.1
 CORE_FAMILY=Xray-rust
 CORE_ASSET_PREFIX=pupspanel-core
-PAYLOAD_SHA=e9494ea93968c514b4eb04309a025cf91ae112143fffb9efc7fd4bc280135638
+PAYLOAD_SHA=104faf106cf063468dcd8feb4aba056337987441b3f2ed482064ba575e39068d
 error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
@@ -45,6 +45,8 @@ armed=0
 owner_busy=0
 mkdir -p /tmp/pupsinator
 if [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then owner_busy=1; echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
+PUPS_INSTALL_OWNER=$(cat /tmp/pupsinator/busy 2>/dev/null || true)
+export PUPS_INSTALL_OWNER
 finish() {
  code=$?
  if [ "$code" -ne 0 ] && [ "$armed" = 0 ] && [ -n "$backup" ]; then case "$backup" in /etc/pupsinator-rollback/txn.*) rm -rf "$backup";; esac; fi
@@ -53,16 +55,33 @@ finish() {
  case "$stage" in /tmp/pupsinator-install.*) rm -rf "$stage";; esac
  case "$core_stage" in /etc/pupsinator-core-stage.*) rm -rf "$core_stage";; esac
  if [ "$owner_busy" = 1 ]; then echo "$code" > /tmp/pupsinator/job-exit; rm -f /tmp/pupsinator/busy; fi
+ if [ "$owner_busy" = 0 ] && [ -n "$PUPS_INSTALL_OWNER" ]; then
+  echo "$PUPS_INSTALL_OWNER" > /tmp/pupsinator/busy
+  echo upgrade > /tmp/pupsinator/job
+  rm -f /tmp/pupsinator/job-exit
+ fi
  rmdir /tmp/pupsinator-installer.lock 2>/dev/null || true
 }
 trap finish EXIT
+vpn_https_ready() {
+ deadline=$(($(date +%s)+35))
+ for target in https://www.gstatic.com/generate_204 https://cp.cloudflare.com/generate_204 https://www.gstatic.com/generate_204; do
+  remaining=$((deadline-$(date +%s)))
+  [ "$remaining" -gt 0 ] || break
+  [ "$remaining" -le 20 ] || remaining=20
+  if code=$(curl --proxy socks5h://127.0.0.1:15434 --proto '=https' -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time "$remaining" "$target") && [ "$code" = 204 ]; then
+   return 0
+  fi
+  sleep 1
+ done
+ return 1
+}
 if [ -e /tmp/pupsinator/active ]; then
- code=$(curl --proxy socks5h://127.0.0.1:15434 -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 12 https://www.gstatic.com/generate_204 || true)
- [ "$code" = 204 ] || error 'Выбранный VPN-сервер не отвечает ещё до обновления. Выберите рабочий сервер и повторите установку.'
+ vpn_https_ready || error 'Выбранный VPN-сервер не отвечает ещё до обновления. Выберите рабочий сервер и повторите установку.'
 fi
 fetch() {
  if command -v curl >/dev/null 2>&1; then
-  if curl --proxy socks5h://127.0.0.1:15434 --proto '=https' --proto-redir '=https' -fLsS --connect-timeout 5 --max-time 90 "$1" -o "$2"; then return; fi
+  if curl --proxy socks5h://127.0.0.1:15434 --proto '=https' --proto-redir '=https' -fLsS --connect-timeout 15 --max-time 90 "$1" -o "$2"; then return; fi
   curl --proto '=https' --proto-redir '=https' -fLsS --connect-timeout 8 --max-time 90 "$1" -o "$2"
  else wget -T 90 -O "$2" "$1"; fi
 }
@@ -111,6 +130,26 @@ for f in "$stage/filesystem"/usr/lib/pupsinator/*.uc; do
   *) ucode -c -o "$stage/check.ucb" "$f" ;;
  esac
 done
+# The 0.7.5 -> 0.8.0 release can update a running panel in place when
+# the core and every file outside the reviewed UI/control set match.
+keep_engine=0
+running_pid=''
+if [ "$VERSION" = 0.8.0 ] && [ "$(tr -d '\r\n' </etc/pupsinator/version 2>/dev/null || true)" = 0.7.5 ] && [ "$core_new" = 0 ] && [ -e /tmp/pupsinator/active ]; then
+ running_pid=$(cat /tmp/pupsinator/engine-ready 2>/dev/null || true)
+ case "$running_pid" in ''|*[!0-9]*) ;; *) if kill -0 "$running_pid" 2>/dev/null; then keep_engine=1; fi ;; esac
+ for service in engine health network observe rollback; do
+  [ ! -e "/etc/init.d/pupsinator-$service" ] || keep_engine=0
+ done
+ while IFS= read -r file; do
+  case "$file" in
+   */|etc/pupsinator/version|usr/lib/pupsinator/control.sh|usr/lib/pupsinator/diagnose.sh|usr/lib/pupsinator/diagnostics.uc|usr/lib/pupsinator/rollback-update.sh|usr/lib/pupsinator/telemetry.uc|usr/lib/pupsinator/updates.sh|usr/share/rpcd/ucode/pupsinator|www/luci-static/resources/view/pupsinator060.js|www/pupsinator/console.html|www/pupsinator/console.js|www/pupsinator/enhancements.js|www/pupsinator/list-layout.css|www/pupsinator/list-layout.js) continue ;;
+  esac
+  if ! cmp -s "$stage/filesystem/$file" "/$file"; then keep_engine=0; break; fi
+ done < "$stage/files"
+fi
+if [ "${PUPS_REQUIRE_KEEP_ENGINE:-0}" = 1 ] && [ "$keep_engine" != 1 ]; then
+ error 'Условия обновления без перезапуска VPN не выполнены. Изменения не применены.'
+fi
 if [ "$core_new" = 1 ]; then
  local_core=''
  case "${1:-}" in --local|--update-local) local_core="$(dirname "$2")/$CORE_ASSET_PREFIX-$CORE_ARCH.gz";; esac
@@ -229,23 +268,29 @@ done
 rm -f /www/pupsinator/assets/corgi-offline-v3.png /www/pupsinator/assets/corgi-dns-v3.png
 mkdir -p /etc/pupsinator /tmp/pupsinator
 if [ ! -f /etc/pupsinator/settings.json ]; then ucode /usr/lib/pupsinator/app.uc bootstrap; fi
-/usr/lib/pupsinator/set-update-schedules.sh
-/etc/init.d/pupspanel-health enable
-/etc/init.d/pupspanel-health restart
-/etc/init.d/pupspanel-network enable
+if [ "$keep_engine" = 0 ]; then
+ /usr/lib/pupsinator/set-update-schedules.sh
+ /etc/init.d/pupspanel-health enable
+ /etc/init.d/pupspanel-health restart
+ /etc/init.d/pupspanel-network enable
+fi
 touch /etc/sysupgrade.conf
 grep -qx '/etc/pupsinator/' /etc/sysupgrade.conf || echo '/etc/pupsinator/' >> /etc/sysupgrade.conf
 grep -qx '/etc/pupsinator-rollback/' /etc/sysupgrade.conf || echo '/etc/pupsinator-rollback/' >> /etc/sysupgrade.conf
 grep -qx '/etc/pupspanel-core-rollback/' /etc/sysupgrade.conf || echo '/etc/pupspanel-core-rollback/' >> /etc/sysupgrade.conf
 if [ -e "$backup/was-active" ]; then
- outer_pid=$(cat /tmp/pupsinator/busy 2>/dev/null || true)
- /usr/lib/pupsinator/control.sh rollback
- rmdir /tmp/pupsinator/lock 2>/dev/null || true
- PUPS_IN_APP_UPDATE=1 /usr/lib/pupsinator/control.sh connect
- if [ "${PUPS_IN_APP_UPDATE:-0}" = 1 ]; then mkdir -p /tmp/pupsinator/lock; echo "$outer_pid" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
- if [ "$owner_busy" = 1 ]; then echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
- code=$(curl --proxy socks5h://127.0.0.1:15434 -s -o /dev/null -w '%{http_code}' --connect-timeout 15 --max-time 30 https://www.gstatic.com/generate_204 || true)
- [ "$code" = 204 ] || error 'Новая версия не прошла проверку VPN. Восстанавливаю предыдущую.'
+ if [ "$keep_engine" = 1 ]; then
+  [ "$running_pid" = "$(cat /tmp/pupsinator/engine-ready 2>/dev/null || true)" ] && kill -0 "$running_pid" 2>/dev/null || error 'Процесс VPN изменился при обновлении панели.'
+  echo 'Панель обновлена без перезапуска VPN. Проверяем связь.'
+ else
+  outer_pid=$(cat /tmp/pupsinator/busy 2>/dev/null || true)
+  /usr/lib/pupsinator/control.sh rollback
+  rmdir /tmp/pupsinator/lock 2>/dev/null || true
+  PUPS_IN_APP_UPDATE=1 /usr/lib/pupsinator/control.sh connect
+  if [ "${PUPS_IN_APP_UPDATE:-0}" = 1 ]; then mkdir -p /tmp/pupsinator/lock; echo "$outer_pid" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
+  if [ "$owner_busy" = 1 ]; then echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
+ fi
+ vpn_https_ready || error 'Новая версия не прошла проверку VPN. Восстанавливаю предыдущую.'
  dns_ready=0
  # dnsmasq can briefly refuse forwarding while its upstream is being started.
  # Accept only an actual successful lookup, with a bounded startup window.
