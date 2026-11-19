@@ -2,13 +2,13 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.7.3
+VERSION=0.7.4
 REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=0.10.1
 CORE_FAMILY=Xray-rust
 CORE_ASSET_PREFIX=pupspanel-core
-PAYLOAD_SHA=52cc7192a1bf70026f81e4dfc940cb066e5e0ca3257e1db49d7be00ca34e8736
+PAYLOAD_SHA=b48b021408a6de9b2fd088ea7d359afdfb4bb60f85d4051d06bd93e39269b23a
 error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
@@ -21,7 +21,7 @@ if [ "$CORE_FAMILY" = Xray-rust ]; then
  case "$(uname -m)" in aarch64|arm64) ;; *) error 'Проверенная сборка Rust пока только для ARM64.';; esac
 fi
 case "$(uname -m)" in
- aarch64|arm64) CORE_ARCH=arm64; CORE_SHA=938be766ce3dc77a5005bba6ba1ee1d6b9d30bb823496bc66a8605ba23df1118; CORE_GZIP_SHA=26be87b8b70a977606142cc2bcb0443a2103cd05d6b463bb5e7267705b319d89 ;;
+ aarch64|arm64) CORE_ARCH=arm64; CORE_SHA=762d92c929d6982c275f2928ff512ae76e43973b4456ef8e3a1ae16af86affe4; CORE_GZIP_SHA=c4509b28a87bc1d8530148d797ebccb7184ee922dc430f08deac27bc71288e05 ;;
  x86_64|amd64) CORE_ARCH=amd64; CORE_SHA=0000000000000000000000000000000000000000000000000000000000000000; CORE_GZIP_SHA=0000000000000000000000000000000000000000000000000000000000000000 ;;
  mips|mipsel|mipsle)
   package_arch=$(apk --print-arch 2>/dev/null || opkg print-architecture 2>/dev/null || true)
@@ -169,10 +169,16 @@ if [ "$core_new" = 1 ]; then
  if [ -f /usr/bin/pupsinator-xray ]; then
   if [ -s /etc/pupspanel-core-rollback/go-xray.gz.sha256 ] && [ "$(sha256sum /usr/bin/pupsinator-xray | awk '{print $1}')" = "$(cat /etc/pupspanel-core-rollback/go-xray.gz.sha256)" ] && /usr/lib/pupsinator/core-archive.sh verify /etc/pupspanel-core-rollback/go-xray.gz >/dev/null 2>&1; then
    for suffix in '' .sha256 .bytes .version .metadata.sha256; do ln "/etc/pupspanel-core-rollback/go-xray.gz$suffix" "$backup/core.previous.gz$suffix"; done
-  else /usr/lib/pupsinator/core-archive.sh save "$backup/core.previous.gz"; fi
+  else
+   case "$(/usr/bin/pupsinator-xray version | head -n 1)" in
+    'Xray-rust '*) /usr/lib/pupsinator/core-archive.sh save-link "$backup/core.previous.gz";;
+    *) /usr/lib/pupsinator/core-archive.sh save "$backup/core.previous.gz";;
+   esac
+  fi
   # A temporary hard link makes rollback independent of free flash. It shares
   # the existing inode, is never executed, and is removed after qualification.
-  ln /usr/bin/pupsinator-xray "$backup/core.previous.bin"
+  [ ! -L "$backup/core.previous.bin" ] || error 'Unsafe transaction hard link'
+  [ -f "$backup/core.previous.bin" ] || ln /usr/bin/pupsinator-xray "$backup/core.previous.bin"
   [ "$(sha256sum "$backup/core.previous.bin" | awk '{print $1}')" = "$(cat "$backup/core.previous.gz.sha256")" ] || error 'Ядро изменилось при создании резервной копии.'
   touch "$backup/core-saved"
   if /usr/bin/pupsinator-xray version | grep -q '^Xray '; then
