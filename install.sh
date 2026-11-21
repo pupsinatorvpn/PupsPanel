@@ -2,13 +2,13 @@
 set -eu
 umask 077
 export GOMEMLIMIT=48MiB GOGC=50
-VERSION=0.8.1
+VERSION=0.8.2
 REPO=pupsinatorvpn/PupsPanel
 MIRROR=https://download.pupsinator.ru
 CORE_VERSION=0.10.1
 CORE_FAMILY=Xray-rust
 CORE_ASSET_PREFIX=pupspanel-core
-PAYLOAD_SHA=fb689e993f82407e0eba04b70880d0c507b3d6e90b650c119add2eda3c91686e
+PAYLOAD_SHA=b418026456bca5d55ac5749fac21a3dc20dd346f4af29e2efa069a998a04eb2b
 error() { echo "PupsPanel: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || error 'Запустите установщик от root на роутере.'
 [ -f /etc/openwrt_release ] || error 'Требуется OpenWrt.'
@@ -43,12 +43,14 @@ core_stage=''
 backup=''
 armed=0
 owner_busy=0
+health_lock=0
 mkdir -p /tmp/pupsinator
 if [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then owner_busy=1; echo "$$" > /tmp/pupsinator/busy; echo upgrade > /tmp/pupsinator/job; fi
 PUPS_INSTALL_OWNER=$(cat /tmp/pupsinator/busy 2>/dev/null || true)
 export PUPS_INSTALL_OWNER
 finish() {
  code=$?
+ if [ "$health_lock" = 1 ]; then rmdir /tmp/pupsinator/lock 2>/dev/null || true; fi
  if [ "$code" -ne 0 ] && [ "$armed" = 0 ] && [ -n "$backup" ]; then case "$backup" in /etc/pupsinator-rollback/txn.*) rm -rf "$backup";; esac; fi
  if [ "$code" -ne 0 ] && [ "$armed" = 1 ]; then cp /usr/lib/pupsinator/rollback-update.sh "$stage/recover.sh"; /bin/sh "$stage/recover.sh" || true; fi
  [ "$armed" != 1 ] || rm -f /usr/bin/pupsinator-xray.new
@@ -136,7 +138,7 @@ keep_engine=0
 running_pid=''
 installed_version=$(tr -d '\r\n' </etc/pupsinator/version 2>/dev/null || true)
 keep_transition=0
-case "$installed_version:$VERSION" in 0.7.5:0.8.0|0.8.0:0.8.1) keep_transition=1 ;; esac
+case "$installed_version:$VERSION" in 0.8.0:0.8.2|0.8.1:0.8.2) keep_transition=1 ;; esac
 if [ "$keep_transition" = 1 ] && [ "$core_new" = 0 ] && [ -e /tmp/pupsinator/active ]; then
  running_pid=$(cat /tmp/pupsinator/engine-ready 2>/dev/null || true)
  case "$running_pid" in ''|*[!0-9]*) ;; *) if kill -0 "$running_pid" 2>/dev/null; then keep_engine=1; fi ;; esac
@@ -145,7 +147,7 @@ if [ "$keep_transition" = 1 ] && [ "$core_new" = 0 ] && [ -e /tmp/pupsinator/act
  done
  while IFS= read -r file; do
   case "$file" in
-   */|etc/pupsinator/version|usr/lib/pupsinator/control.sh|usr/lib/pupsinator/diagnose.sh|usr/lib/pupsinator/diagnostics.uc|usr/lib/pupsinator/rollback-update.sh|usr/lib/pupsinator/telemetry.uc|usr/lib/pupsinator/updates.sh|usr/share/rpcd/ucode/pupsinator|www/luci-static/resources/view/pupsinator060.js|www/pupsinator/console.html|www/pupsinator/console.js|www/pupsinator/console.css|www/pupsinator/enhancements.js|www/pupsinator/list-layout.css|www/pupsinator/list-layout.js) continue ;;
+   */|etc/pupsinator/version|usr/lib/pupsinator/control.sh|usr/lib/pupsinator/engine-sync.sh|usr/lib/pupsinator/health.sh|usr/lib/pupsinator/probe-once.sh|usr/share/rpcd/ucode/pupsinator|www/luci-static/resources/view/pupsinator060.js|www/pupsinator/console.html|www/pupsinator/console.js|www/pupsinator/console.css|www/pupsinator/ping-modes.js) continue ;;
   esac
   if ! cmp -s "$stage/filesystem/$file" "/$file"; then keep_engine=0; break; fi
  done < "$stage/files"
@@ -276,6 +278,17 @@ if [ "$keep_engine" = 0 ]; then
  /etc/init.d/pupspanel-health enable
  /etc/init.d/pupspanel-health restart
  /etc/init.d/pupspanel-network enable
+else
+ if [ "${PUPS_IN_APP_UPDATE:-0}" != 1 ]; then
+  attempts=0
+  until mkdir /tmp/pupsinator/lock 2>/dev/null; do
+   attempts=$((attempts+1)); [ "$attempts" -lt 15 ] || error 'Не удалось дождаться завершения проверки серверов.'
+   sleep 1
+  done
+  health_lock=1
+ fi
+ /etc/init.d/pupspanel-health restart
+ if [ "$health_lock" = 1 ]; then rmdir /tmp/pupsinator/lock; health_lock=0; fi
 fi
 touch /etc/sysupgrade.conf
 grep -qx '/etc/pupsinator/' /etc/sysupgrade.conf || echo '/etc/pupsinator/' >> /etc/sysupgrade.conf
